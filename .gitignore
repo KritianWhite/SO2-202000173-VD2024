@@ -1,0 +1,13 @@
+# Ignorar archivos binarios
+*.o
+*.ko
+*.mod.c
+
+# Ignorar carpetas de compilación
+/arch/x86/boot/compressed/vmlinux.bin
+/build/
+/initramfs*
+
+# Archivos temporales
+*.tmp
+*.log
