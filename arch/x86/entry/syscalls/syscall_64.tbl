@@ -421,3 +421,4 @@
 
 548 common _202000173_capture_memory_snapshot sys__202000173_capture_memory_snapshot
 549 common _202000173_get_io_throttle sys__202000173_get_io_throttle
+550 common _202000173_tamalloc sys__202000173_tamalloc

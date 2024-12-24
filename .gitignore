@@ -2,6 +2,11 @@
 *.o
 *.ko
 *.mod.c
+*.cmd
+*symvers
+*order
+*.mod
+*.a
 
 # Ignorar carpetas de compilación
 /arch/x86/boot/compressed/vmlinux.bin
