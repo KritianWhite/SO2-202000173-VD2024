@@ -1,115 +1,108 @@
-#include <linux/module.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <linux/mm.h>
-#include <linux/uaccess.h>
-#include <linux/string.h>
-#include <linux/init.h>
-#include <linux/syscalls.h>
-#include <linux/sched.h>
-#include <asm/page.h>
+#include <linux/syscalls.h>   // Para SYSCALL_DEFINE
+#include <linux/mm.h>         // Para do_mmap, find_vma, vm_fault, etc.
+#include <linux/mman.h>       // Para MAP_*, PROT_*
+#include <linux/slab.h>       // Para alloc_page, kzalloc, etc. (si lo requieres)
+#include <linux/uaccess.h>    // Para copy_to_user, etc. (si fuera necesario)
+#include <linux/mm_types.h>
+#include <linux/sched.h>      // current->mm
+#include <asm/page.h>         // PAGE_ALIGN, PAGE_SIZE, etc.
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("KritianWhite");
-MODULE_DESCRIPTION("Módulo que llama a _202000173_tamalloc y muestra info en /proc/202000173_module_tamalloc");
-
-// ----------------------------------------------------------------------
-// 1) Declaración 'extern' de la syscall en el kernel (¡requiere exportarla!)
-// ----------------------------------------------------------------------
-extern long sys_202000173_tamalloc(size_t size);
-
-// ----------------------------------------------------------------------
-// 2) Variables globales para almacenar la dirección y tamaño de Tamalloc
-// ----------------------------------------------------------------------
-static void  *tamalloc_address = NULL;
-static size_t tamalloc_size    = 0;
-
-// ----------------------------------------------------------------------
-// 3) Función que se invoca al hacer "cat /proc/202000173_module_tamalloc"
-// ----------------------------------------------------------------------
-static int tamalloc_proc_show(struct seq_file *m, void *v)
+/* 
+* --------------------------------------------------------------------
+* Función tamalloc_fault:
+* Se encarga de atender el page fault, asignando una página y
+* limpiándola en cero la PRIMERA vez que se accede a ella.
+* --------------------------------------------------------------------
+*/
+static vm_fault_t tamalloc_fault(struct vm_fault *vmf)
 {
-    seq_puts(m, "=========================================\n");
-    seq_puts(m, "          Información de Tamalloc\n");
-    seq_puts(m, "=========================================\n\n");
+    struct page *page;
 
-    if (tamalloc_address) {
-        seq_printf(m, "Dirección de memoria (User-Space): %p\n", tamalloc_address);
-        seq_printf(m, "Tamaño de memoria asignada       : %zu bytes\n", tamalloc_size);
-    } else {
-        seq_puts(m, "No se ha asignado memoria con Tamalloc.\n");
-    }
+    // Intentar asignar una página física
+    page = alloc_page(GFP_KERNEL);
+    if (!page)
+        return VM_FAULT_OOM;  // Indica al kernel que no pudo asignarse
 
-    seq_puts(m, "\n=========================================\n");
-    return 0;
+    /*
+     * Limpiamos (en cero) la página asignada.
+     * clear_user_page() es una forma “segura” de hacer memset a 0.
+     * También podríamos usar: memset(page_address(page), 0, PAGE_SIZE).
+     */
+    clear_user_page(page_address(page), vmf->address, page);
+
+    // Aumentamos la cuenta de referencia para evitar que el kernel libere la página
+    get_page(page);
+
+    // Retornamos la página para que el kernel la mapee
+    vmf->page = page;
+    return VM_FAULT_NOPAGE;
 }
 
-// Función open para seq_file
-static int tamalloc_proc_open(struct inode *inode, struct file *file)
-{
-    return single_open(file, tamalloc_proc_show, NULL);
-}
-
-// Operaciones para /proc
-static const struct proc_ops tamalloc_proc_ops = {
-    .proc_open    = tamalloc_proc_open,
-    .proc_read    = seq_read,
-    .proc_lseek   = seq_lseek,
-    .proc_release = single_release,
+/* 
+* --------------------------------------------------------------------
+* Estructura vm_operations para vincular la función de fallo
+* --------------------------------------------------------------------
+*/
+static const struct vm_operations_struct tamalloc_vm_ops = {
+    .fault = tamalloc_fault,  // Nuestra función de page fault perezoso
 };
 
-// ----------------------------------------------------------------------
-// 4) init_module: Crea /proc/202000173_module_tamalloc y llama a tamalloc
-// ----------------------------------------------------------------------
-static int __init tamalloc_module_init(void)
+/* --------------------------------------------------------------------
+* Syscall _202000173_tamalloc
+* Recibe: size_t size => cantidad de bytes a mapear perezosamente
+*--------------------------------------------------------------------
+*/
+SYSCALL_DEFINE1(_202000173_tamalloc, size_t, size)
 {
+    struct mm_struct *mm = current->mm;
+    struct vm_area_struct *vma;
+    unsigned long addr;
+    unsigned long populate = 0; // do_mmap() lo usa si queremos “forzar” pre-fault
     long ret;
 
-    pr_info("202000173_module_tamalloc: cargando módulo...\n");
+    // Alinear el tamaño al tamaño de página
+    size = PAGE_ALIGN(size);
+    if (!size)
+        return -EINVAL;
 
-    // Asignamos, por ejemplo, 1 MB de memoria con Tamalloc
-    tamalloc_size = 1024 * 1024;
-    pr_info("Solicitando Tamalloc de %zu bytes...\n", tamalloc_size);
+    /*
+    * ----------------------------------------------------------------
+    * do_mmap() en kernel 6.5 recibe 8 argumentos:
+    * 1) struct file *file      => NULL => mapeo anónimo
+    * 2) unsigned long addr     => 0 => el kernel elige la base
+    * 3) unsigned long len      => tamaño en bytes
+    * 4) unsigned long prot     => PROT_READ | PROT_WRITE
+    * 5) unsigned long flags    => MAP_PRIVATE | MAP_ANONYMOUS
+    * 6) unsigned long pgoff    => 0 => no aplica a anónimos
+    * 7) unsigned long *populate => &populate o NULL
+    * 8) struct list_head *uf   => NULL
+    * ----------------------------------------------------------------
+    */ 
+    addr = do_mmap(NULL, 0, size,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS,
+                   0,
+                   &populate,
+                   NULL);
 
-    // Llamada directa a la syscall _202000173_tamalloc
-    ret = sys_202000173_tamalloc(tamalloc_size);
-    if (ret < 0) {
-        pr_err("Error al asignar memoria con Tamalloc: %ld\n", ret);
-        tamalloc_address = NULL;
-    } else {
-        tamalloc_address = (void *)ret;  // Dirección de espacio de usuario
-        pr_info("Tamalloc: memoria asignada en %p\n", tamalloc_address);
+    // Si do_mmap falla, retorna un valor “IS_ERR_VALUE”
+    if (IS_ERR_VALUE(addr))
+        return (long)addr; // Por ejemplo -ENOMEM, -EFAULT, etc.
+
+    // Tomamos el lock de mm para modificar la VMA
+    down_write(&mm->mmap_lock);
+    vma = find_vma(mm, addr);
+    if (!vma) {
+        up_write(&mm->mmap_lock);
+        return -EFAULT;
     }
 
-    // Crear la entrada /proc/202000173_module_tamalloc
-    if (!proc_create("202000173_module_tamalloc", 0, NULL, &tamalloc_proc_ops)) {
-        pr_err("Error al crear /proc/202000173_module_tamalloc\n");
-        // Si falla, liberamos la memoria
-        if (tamalloc_address)
-            vm_munmap((unsigned long)tamalloc_address, tamalloc_size);
-        return -ENOMEM;
-    }
+    // Vinculamos nuestro vm_ops para el page fault perezoso
+    vma->vm_ops = &tamalloc_vm_ops;
 
-    pr_info("/proc/202000173_module_tamalloc creado.\n");
-    return 0;
+    // Si deseas asociar datos privados: vma->vm_private_data = ...
+    up_write(&mm->mmap_lock);
+
+    // Retornamos la dirección de usuario en que se mapeó
+    return addr;
 }
-
-// ----------------------------------------------------------------------
-// 5) cleanup_module: Elimina la entrada de /proc y libera la memoria
-// ----------------------------------------------------------------------
-static void __exit tamalloc_module_exit(void)
-{
-    pr_info("202000173_module_tamalloc: descargando módulo...\n");
-
-    // Liberamos la región de usuario si fue asignada
-    if (tamalloc_address) {
-        vm_munmap((unsigned long)tamalloc_address, tamalloc_size);
-        pr_info("Tamalloc: se liberó la memoria en %p\n", tamalloc_address);
-    }
-
-    remove_proc_entry("202000173_module_tamalloc", NULL);
-    pr_info("/proc/202000173_module_tamalloc eliminado.\n");
-}
-
-module_init(tamalloc_module_init);
-module_exit(tamalloc_module_exit);
