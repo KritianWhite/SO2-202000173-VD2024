@@ -12,7 +12,7 @@ struct memory_info {
     unsigned long mem_addr;   // Dirección de memoria asignada
 };
 
-#define SYS__202000173_tamalloc 550 // Cambia esto si tu syscall tiene otro número
+#define SYS__202000173_tamalloc 550
 
 // Variable global para controlar el bucle
 volatile sig_atomic_t keep_running = 1;
@@ -35,14 +35,13 @@ int main(int argc, char *argv[]) {
     // Configura el manejador de señal para capturar Ctrl+C
     signal(SIGINT, handle_signal);
 
-    printf("Monitoreando el proceso con PID %d. Presiona Ctrl+C para salir.\n", pid);
 
     // Bucle para actualizar y mostrar los valores en tiempo real
     while (keep_running) {
         // Llamada al syscall
         ret = syscall(SYS__202000173_tamalloc, pid, &mem_info);
         if (ret < 0) {
-            fprintf(stderr, "Error en syscall: %s\n", strerror(errno));
+            fprintf(stderr, "\033[1;31mError en syscall: \033[1;34m%s\n", strerror(errno));
             return 1;
         }
 
@@ -52,17 +51,26 @@ int main(int argc, char *argv[]) {
 
         // Limpia la pantalla (opcional para simular "tiempo real")
         printf("\033[H\033[J");
+        printf("\033[1;34m=================================================================\033[0m\n");
+        printf("\033[1;36m                     MONITOREO DE MEMORIA                        \033[0m\n");
+        printf("\033[1;34m=================================================================\033[0m\n");
+        printf("\033[1;37mMonitoreando el proceso con PID %d. \n(Presiona Ctrl+C para salir.)\n \n", pid);
+        printf("\033[1;34m-----------------------------------------------------------------\033[0m\n");
 
         // Imprime los resultados actualizados
-        printf("Resultados de la syscall _202000173_tamalloc:\n");
-        printf("vmSize: %lu KB\n", vmSize_kb);
-        printf("vmRSS: %lu KB\n", vmRSS_kb);
-        printf("Dirección virtual asignada: 0x%lx\n", mem_info.mem_addr);
+        printf("\033[1;37m| %-35s | %-23s |\033[0m\n", "Campo", "Valor");
+        printf("\033[1;34m-----------------------------------------------------------------\033[0m\n");
+        printf("\033[1;37m| %-36s | \033[1;32m%-20lu KB\033[1;37m |\033[0m\n", "Tamaño total de memoria (vmSize)", vmSize_kb);
+        printf("\033[1;37m| %-30s | \033[1;32m%-20lu KB\033[1;37m |\033[0m\n", "Tamaño de memoria residente (vmRSS)", vmRSS_kb);
+        printf("\033[1;37m| %-36s | \033[1;34m0x%-18lx\033[1;37m    |\033[0m\n", "Dirección de memoria asignada", mem_info.mem_addr);
+        printf("\033[1;34m-----------------------------------------------------------------\033[0m\n");
 
         // Espera 1 segundo antes de la siguiente actualización
         sleep(1);
     }
 
-    printf("\nMonitoreo terminado. ¡Hasta luego!\n");
+    printf("\033[1;34m\n=================================================================\033[0m\n");
+    printf("\033[1;36m             MONITOREO FINALIZADO. ¡HASTA LUEGO!                 \033[0m\n");
+    printf("\033[1;34m=================================================================\033[0m\n");
     return 0;
 }
