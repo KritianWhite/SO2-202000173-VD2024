@@ -1,138 +1,68 @@
 #include <stdio.h>
-#include <stdlib.h>
+#include <sys/syscall.h>
 #include <unistd.h>
-#include <string.h>
-#include <sys/mman.h>
+#include <stdlib.h>
 #include <errno.h>
+#include <string.h>
 #include <signal.h>
-#include <stdbool.h>
 
-static unsigned long get_process_rss_kb(pid_t pid)
-{
-    char path[64];
-    FILE *f;
-    unsigned long rss_kb = 0;
-
-    snprintf(path, sizeof(path), "/proc/%d/status", pid);
-    f = fopen(path, "r");
-    if (!f) {
-        // Si el proceso no existe o no hay permisos
-        return 0;
-    }
-
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "VmRSS:", 6) == 0) {
-            // Ejemplo: "VmRSS:     1234 kB"
-            sscanf(line, "VmRSS: %lu kB", &rss_kb);
-            break;
-        }
-    }
-    fclose(f);
-    return rss_kb;
-}
-
-// Estructura simple para guardar la info de cada bloque mapeado
-struct allocation {
-    void   *addr;
-    size_t  size;
+struct memory_info {
+    unsigned long vmSize;     // Tamaño total de la memoria virtual
+    unsigned long vmRSS;      // Tamaño de la memoria residente
+    unsigned long mem_addr;   // Dirección de memoria asignada
 };
 
-static struct allocation *blocks       = NULL; // Arreglo dinámico de asignaciones
-static size_t             blocks_count = 0;    // Cuántos bloques tenemos
-static bool               stop_loop    = false;
+#define SYS__202000173_tamalloc 550 // Cambia esto si tu syscall tiene otro número
 
-/*
-* ---------------------------------------------------------------------
-* Manejador de señal Ctrl+C
-* ---------------------------------------------------------------------
-*/
-static void handle_sigint(int sig)
-{
-    (void)sig; // no se usa
-    stop_loop = true;
+// Variable global para controlar el bucle
+volatile sig_atomic_t keep_running = 1;
+
+// Manejador de señal para terminar el programa con Ctrl+C
+void handle_signal(int signal) {
+    keep_running = 0;
 }
 
-/*
-* main
-*/
-int main(int argc, char *argv[])
-{
-    // Cantidad de MB a asignar en cada iteración
-    // Ajusta este valor para “llenar” más rápido o más lento
-    size_t chunk_mb = 10;
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Uso: %s <pid>\n", argv[0]);
+        return 1;
+    }
 
-    // Instalar handler de Ctrl+C
-    signal(SIGINT, handle_sigint);
+    pid_t pid = atoi(argv[1]);
+    struct memory_info mem_info;
+    int ret;
 
-    printf("Se asignarán bloques de %zu MB indefinidamente...\n", chunk_mb);
-    printf("Presiona Ctrl+C para terminar.\n");
+    // Configura el manejador de señal para capturar Ctrl+C
+    signal(SIGINT, handle_signal);
 
-    while (!stop_loop) {
-        // Limpia pantalla con secuencia ANSI
+    printf("Monitoreando el proceso con PID %d. Presiona Ctrl+C para salir.\n", pid);
+
+    // Bucle para actualizar y mostrar los valores en tiempo real
+    while (keep_running) {
+        // Llamada al syscall
+        ret = syscall(SYS__202000173_tamalloc, pid, &mem_info);
+        if (ret < 0) {
+            fprintf(stderr, "Error en syscall: %s\n", strerror(errno));
+            return 1;
+        }
+
+        // Conversión de bytes a kilobytes
+        unsigned long vmSize_kb = mem_info.vmSize / 1024;
+        unsigned long vmRSS_kb = mem_info.vmRSS / 1024;
+
+        // Limpia la pantalla (opcional para simular "tiempo real")
         printf("\033[H\033[J");
 
-        // 1) Reserva un nuevo bloque con mmap
-        size_t block_size = chunk_mb * 1024 * 1024;
-        void *addr = mmap(
-            NULL,
-            block_size,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
-            -1,
-            0
-        );
-        if (addr == MAP_FAILED) {
-            perror("mmap");
-            fprintf(stderr, "No se pudo asignar otro bloque. Saliendo...\n");
-            break;
-        }
+        // Imprime los resultados actualizados
+        printf("Resultados de la syscall _202000173_tamalloc:\n");
+        printf("vmSize: %lu KB\n", vmSize_kb);
+        printf("vmRSS: %lu KB\n", vmRSS_kb);
+        printf("Dirección virtual asignada: 0x%lx\n", mem_info.mem_addr);
 
-        // Guardar en nuestro array dinámico
-        //    - Realloc para blocks_count + 1
-        struct allocation *new_blocks = realloc(blocks, (blocks_count + 1) * sizeof(*blocks));
-        if (!new_blocks) {
-            perror("realloc");
-            // Liberar el bloque recién asignado, porque no pudimos ampliar el array
-            munmap(addr, block_size);
-            break;
-        }
-        blocks = new_blocks;
-        blocks[blocks_count].addr = addr;
-        blocks[blocks_count].size = block_size;
-        blocks_count++;
-
-        // “Tocar” el nuevo bloque para llenar la memoria y disparar page faults
-        memset(addr, 0xFF, block_size);
-
-        // Calcular cuánta memoria se ha asignado en total (en MB)
-        size_t total_bytes = 0;
-        for (size_t i = 0; i < blocks_count; i++) {
-            total_bytes += blocks[i].size;
-        }
-        size_t total_mb = total_bytes >> 20;
-
-        // Leer nuestro propio RSS
-        unsigned long rss_kb = get_process_rss_kb(getpid());
-        double rss_mb = rss_kb / 1024.0;
-
-        // Imprimir estado
-        printf("=========================================\n");
-        printf("Bloques asignados       : %zu\n", blocks_count);
-        printf("Ultimo bloque           : %p \n", addr);
-        printf("Memoria total           : %zu kb\n", total_bytes);
-        printf("RSS (proceso)           : %lu kb\n", rss_kb);
-        printf("=========================================\n");
-
-        usleep(300000);  // 0.3 seg para salir
+        // Espera 1 segundo antes de la siguiente actualización
+        sleep(1);
     }
 
-    // liberamos todos los bloques
-    printf("\nLiberando %zu bloques...\n", blocks_count);
-    for (size_t i = 0; i < blocks_count; i++) {
-        munmap(blocks[i].addr, blocks[i].size);
-    }
-    free(blocks);
-    printf("Saliendo.\n");
+    printf("\nMonitoreo terminado. ¡Hasta luego!\n");
     return 0;
 }
