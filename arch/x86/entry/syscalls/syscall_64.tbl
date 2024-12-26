@@ -423,3 +423,4 @@
 549 common _202000173_get_io_throttle sys__202000173_get_io_throttle
 550 common _202000173_tamalloc sys__202000173_tamalloc
 551 common _202000173_memory_allocation_statistics sys__202000173_memory_allocation_statistics
+552 common _202000173_tamalloc_stats sys__202000173_tamalloc_stats

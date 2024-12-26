@@ -639,7 +639,7 @@ asmlinkage long sys_tgkill(pid_t tgid, pid_t pid, int sig);
 asmlinkage long sys_sigaltstack(const struct sigaltstack __user *uss,
 				struct sigaltstack __user *uoss);
 asmlinkage long sys_rt_sigsuspend(sigset_t __user *unewset, size_t sigsetsize);
-asmlinkage long sys__202000173_tamalloc(pid_t pid, struct memory_info __user *user_mem_info);
+// asmlinkage long sys__202000173_tamalloc(pid_t pid, struct memory_info __user *user_mem_info);
 
 #ifndef CONFIG_ODD_RT_SIGACTION
 asmlinkage long sys_rt_sigaction(int,
