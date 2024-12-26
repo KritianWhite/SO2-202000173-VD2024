@@ -1,198 +1,136 @@
-#include <linux/syscalls.h>   // Para SYSCALL_DEFINE
-#include <linux/sched.h>      // for_each_process, task_struct
-#include <linux/mm.h>         // mm->total_vm, get_mm_rss
-#include <linux/mm_types.h>
-#include <linux/uaccess.h>    // copy_to_user, copy_from_user
-#include <linux/rcupdate.h>   // rcu_read_lock, for_each_process
-#include <asm/page.h>         // PAGE_SIZE
+#include <linux/kernel.h>
+#include <linux/syscalls.h>   // Para SYSCALL_DEFINE, definir nuevas syscalls
+#include <linux/sched.h>      // for_each_process, task_struct, manejo de procesos
+#include <linux/mm.h>         // mm->total_vm, get_mm_rss, información de memoria
+#include <linux/mm_types.h>   // Tipos asociados con la memoria
+#include <linux/uaccess.h>    // copy_to_user, copy_from_user, para interacción con espacio de usuario
+#include <linux/rcupdate.h>   // rcu_read_lock, sincronización para estructuras protegidas por RCU
+#include <linux/pid.h>        // find_vpid, pid_task, búsqueda de procesos por PID
 
 /*
  * Estructuras de datos para la syscall
+ *
+ * Esta estructura se utiliza para proporcionar información sobre el proceso
+ * que el usuario especifica mediante el PID. Contiene:
+ *   - vm_kb: Memoria virtual total en KB
+ *   - rss_kb: Resident Set Size en KB (memoria física utilizada)
+ *   - rss_percent_of_vm: Porcentaje de RSS sobre la memoria virtual
+ *   - oom_adjustment: Ajuste de prioridad respecto al OOM killer
  */
-
-// Info por proceso
-struct process_mem_stat {
-    pid_t pid;
-    __u64 reserved_kb;   // Memoria reservada en KB
-    __u64 commited_kb;   // Memoria utilizada en KB
-    __u8  usage_percent; // (commited_kb / reserved_kb)*100 (si reserved_kb>0)
-    __u32 oom_score;     // Placeholder o valor calculado
-};
-
-// Resumen global
-struct memory_summary {
-    __u64 total_reserved_mb;  // Suma total reservada (MB)
-    __u64 total_commited_mb;  // Suma total utilizada (MB)
-};
-
-// Parámetros de la syscall
-struct mem_stats_req {
-    /*
-     * Buffer en user space donde escribiremos:
-     *   - Primero: 'num_procs_used' elementos de struct process_mem_stat
-     *   - Luego:   1 elemento de struct memory_summary
-     */
-    struct process_mem_stat __user *stats_buf;
-
-    // Tamaño máximo en cantidad de 'struct process_mem_stat' que el
-    // usuario reservó en su buffer. Si hay más procesos, solo se devuelven
-    // 'num_procs_max' y se truncan los restantes.
-    __u32  num_procs_max;
-
-    // Devuelto por la syscall: cuántos procesos realmente se escribieron
-    // en el buffer (puede ser <= num_procs_max).
-    __u32  num_procs_used;
-
-    // PID específico (0 => mostrar todos)
-    pid_t  specific_pid;
+struct tamalloc_proc_info {
+	unsigned long vm_kb;                // Memoria virtual en KB
+	unsigned long rss_kb;               // Resident Set Size en KB (memoria física utilizada)
+	unsigned int rss_percent_of_vm;     // Porcentaje de RSS sobre la memoria virtual
+	int oom_adjustment;                 // Ajuste del proceso respecto al OOM killer
 };
 
 /*
  * Syscall: _202000173_memory_allocation_statistics
+ *
+ * Esta syscall proporciona estadísticas de memoria para un proceso dado por su PID.
+ * Argumentos:
+ *   - pid: Identificador de proceso (PID) del cual se quieren obtener las estadísticas
+ *   - info: Puntero a una estructura en el espacio de usuario donde se almacenarán
+ *           las estadísticas recopiladas
  */
-SYSCALL_DEFINE1(_202000173_memory_allocation_statistics,
-                struct mem_stats_req __user *, arg)
+SYSCALL_DEFINE2(_202000173_memory_allocation_statistics, pid_t, pid,  struct tamalloc_proc_info __user *, info)
 {
-    struct mem_stats_req karg;           // Copia local de los parámetros
-    struct process_mem_stat st;          // Estructura temporal para cada proceso
-    struct memory_summary summary = {0}; // Acumulador de totales
-    unsigned int count = 0;             // Cuántos procesos guardamos
-    struct task_struct *p;
-    int ret = 0;
+	/*
+	 * task_struct representa el proceso dentro del kernel.
+	 * Se utiliza para acceder a toda la información relacionada con el proceso.
+	 */
+	struct task_struct *task;                      
 
-    // Validar puntero 'arg'
-    if (!arg)
-        return -EINVAL;
+	/*
+	 * mm_struct almacena toda la información de memoria de un proceso.
+	 * Contiene detalles sobre la memoria virtual y física asignada al proceso.
+	 */
+	struct mm_struct *mm;                          
 
-    // Copiar desde user-space a kernel-space
-    if (copy_from_user(&karg, arg, sizeof(karg)))
-        return -EFAULT;
+	/*
+	 * Estructura temporal en el espacio del kernel donde se recopilarán
+	 * las estadísticas de memoria del proceso antes de copiarlas al
+	 * espacio de usuario.
+	 */
+	struct tamalloc_proc_info kinfo;               
 
-    // Validar parámetros
-    if (!karg.stats_buf || karg.num_procs_max == 0)
-        return -EINVAL;
+	/*
+	 * Bloqueamos el acceso concurrente a las estructuras protegidas por
+	 * RCU (Read-Copy-Update), lo que permite acceder de manera segura a
+	 * datos compartidos como las estructuras de procesos.
+	 */
+	rcu_read_lock();                               
 
-    // Recorremos la lista de procesos
-    rcu_read_lock();
+	/*
+	 * Buscamos el proceso utilizando su PID.
+	 * Si no se encuentra el proceso, devolvemos un error indicando que
+	 * el proceso no existe (ESRCH).
+	 */
+	task = pid_task(find_vpid(pid), PIDTYPE_PID); 
+	if (!task) {
+		rcu_read_unlock();
+		return -ESRCH;
+	}
 
-    if (karg.specific_pid != 0) {
-        /*
-         * Caso 1: El usuario pidió un PID específico.
-         */
-        p = pid_task(find_vpid(karg.specific_pid), PIDTYPE_PID);
-        if (p) {
-            struct mm_struct *mm = get_task_mm(p);
-            if (mm) {
-                // Calcular "reserved" y "commited"
-                unsigned long reserved_pages = mm->total_vm;   // virtual pages
-                unsigned long rss_pages      = get_mm_rss(mm); // resident pages
-                mmput(mm);
+	/*
+	 * Obtenemos la estructura mm_struct del proceso.
+	 * Si no tiene memoria asociada (por ejemplo, en el caso de hilos del kernel),
+	 * devolvemos un error indicando parámetros inválidos (EINVAL).
+	 */
+	mm = get_task_mm(task);                       
+	if (!mm) {
+		rcu_read_unlock();
+		return -EINVAL;
+	}
 
-                // Pasar a KB
-                __u64 reserved_kb = ((unsigned long long)reserved_pages * PAGE_SIZE) >> 10;
-                __u64 commited_kb = ((unsigned long long)rss_pages      * PAGE_SIZE) >> 10;
-                __u8  usage_pct   = 0;
+	/*
+	 * Convertimos las páginas a KB utilizando:
+	 *   (valor * PAGE_SIZE) >> 10
+	 * Esto nos da el total de memoria virtual (vm_kb) y memoria física (rss_kb)
+	 * en kilobytes.
+	 */
+	kinfo.vm_kb  = (mm->total_vm     * PAGE_SIZE) >> 10;  
+	kinfo.rss_kb = (get_mm_rss(mm)   * PAGE_SIZE) >> 10;  
 
-                if (reserved_kb > 0) {
-                    if (commited_kb <= reserved_kb) {
-                        usage_pct = (commited_kb * 100) / reserved_kb;
-                    } else {
-                        usage_pct = 100;
-                    }
-                }
+	/*
+	 * Calculamos el porcentaje de memoria física (RSS) sobre la memoria virtual.
+	 * Si la memoria virtual es 0, asignamos el porcentaje como 0 para evitar
+	 * divisiones por cero.
+	 */
+	if (kinfo.vm_kb > 0)
+		kinfo.rss_percent_of_vm = (kinfo.rss_kb * 100) / kinfo.vm_kb;
+	else
+		kinfo.rss_percent_of_vm = 0;                  
 
-                // Llenar la estructura
-                st.pid           = p->pid;
-                st.reserved_kb   = reserved_kb;
-                st.commited_kb   = commited_kb;
-                st.usage_percent = usage_pct;
-                st.oom_score     = 0; // placeholder
+	/*
+	 * Extraemos el valor de ajuste respecto al OOM killer desde la
+	 * estructura de señales del proceso y lo almacenamos en la estructura
+	 * de salida (kinfo).
+	 */
+	kinfo.oom_adjustment = task->signal->oom_score_adj;  
 
-                // Acumular al summary (en MB: reserved_kb >> 10 => MB)
-                summary.total_reserved_mb += (reserved_kb >> 10);
-                summary.total_commited_mb += (commited_kb >> 10);
+	/*
+	 * Liberamos la referencia a la estructura mm_struct que habíamos obtenido
+	 * previamente para evitar fugas de memoria.
+	 */
+	mmput(mm);                                       
 
-                // Copiar a user-space
-                if (copy_to_user(&karg.stats_buf[0], &st, sizeof(st))) {
-                    ret = -EFAULT;
-                } else {
-                    count = 1;
-                }
-            }
-        }
-    } else {
-        /*
-         * Caso 2: El usuario pidió TODOS los procesos (specific_pid == 0).
-         */
-        for_each_process(p) {
-            struct mm_struct *mm = get_task_mm(p);
-            if (!mm)
-                continue;
+	/*
+	 * Liberamos el bloqueo RCU para indicar que hemos terminado de
+	 * acceder a las estructuras protegidas.
+	 */
+	rcu_read_unlock();                               
 
-            // Calcular pages
-            unsigned long reserved_pages = mm->total_vm;
-            unsigned long rss_pages      = get_mm_rss(mm);
-            mmput(mm);
+	/*
+	 * Copiamos la información recopilada desde el espacio del kernel (kinfo)
+	 * al espacio de usuario (info). Si la operación falla, devolvemos un
+	 * error de fallo de memoria (EFAULT).
+	 */
+	if (copy_to_user(info, &kinfo, sizeof(kinfo)))
+		return -EFAULT;                             
 
-            // Pasar a KB
-            __u64 reserved_kb = ((unsigned long long)reserved_pages * PAGE_SIZE) >> 10;
-            __u64 commited_kb = ((unsigned long long)rss_pages      * PAGE_SIZE) >> 10;
-            __u8  usage_pct   = 0;
-
-            if (reserved_kb > 0) {
-                if (commited_kb <= reserved_kb) {
-                    usage_pct = (commited_kb * 100) / reserved_kb;
-                } else {
-                    usage_pct = 100;
-                }
-            }
-
-            // Llenar 'st'
-            st.pid           = p->pid;
-            st.reserved_kb   = reserved_kb;
-            st.commited_kb   = commited_kb;
-            st.usage_percent = usage_pct;
-            st.oom_score     = 0; // placeholder
-
-            summary.total_reserved_mb += (reserved_kb >> 10);
-            summary.total_commited_mb += (commited_kb >> 10);
-
-            // Copiar al buffer si hay espacio
-            if (count < karg.num_procs_max) {
-                if (copy_to_user(&karg.stats_buf[count], &st, sizeof(st))) {
-                    ret = -EFAULT;
-                    break;
-                }
-                count++;
-            } else {
-                // Ya no cabe más
-                break;
-            }
-        }
-    }
-
-    rcu_read_unlock();
-
-    // Guardar la cantidad real de procesos escritos
-    karg.num_procs_used = count;
-
-    // Copiar el summary al final del array
-    if (ret == 0) {
-        struct memory_summary __user *summary_ptr;
-        // La posición en el array es 'count' (después de los count elementos)
-        summary_ptr = (struct memory_summary __user *)&karg.stats_buf[count];
-
-        if (copy_to_user(summary_ptr, &summary, sizeof(summary))) {
-            ret = -EFAULT;
-        }
-    }
-
-    // Copiar la estructura karg actualizada (num_procs_used) de vuelta
-    if (ret == 0) {
-        if (copy_to_user(arg, &karg, sizeof(karg))) {
-            ret = -EFAULT;
-        }
-    }
-
-    return ret;
+	/*
+	 * Retornamos 0 para indicar que la operación se completó con éxito.
+	 */
+	return 0;                                       
 }
