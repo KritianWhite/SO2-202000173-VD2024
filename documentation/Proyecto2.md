@@ -411,3 +411,8 @@ sleep_ms(1000);
   - **Nombre (`_202000173_*`)**: Identifica la syscall en el espacio de usuario.
   - **Función (`sys__202000173_*`)**: Nombre de la implementación de la syscall en el espacio del kernel.
 
+## Mensaje:
+El desarrollo de "Tamalloc con Lazy-Zeroing" introdujo innovaciones en la gestión de memoria del kernel Linux, priorizando la eficiencia y el monitoreo detallado. Las syscalls implementadas ofrecen estadísticas claras y asignaciones optimizadas para procesos. Las pruebas demostraron su robustez y aplicabilidad.
+
+## Conclusión:
+El proyecto destacó por su diseño eficiente y enfoque práctico, consolidando "Tamalloc" como un avance clave en la personalización del kernel Linux para mejorar el rendimiento y el control de memoria.
