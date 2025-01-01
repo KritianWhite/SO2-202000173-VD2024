@@ -424,3 +424,8 @@
 550 common _202000173_tamalloc sys__202000173_tamalloc
 551 common _202000173_memory_allocation_statistics sys__202000173_memory_allocation_statistics
 552 common _202000173_tamalloc_stats sys__202000173_tamalloc_stats
+
+557 common _202000173_add_memory_limit      sys__202000173_add_memory_limit
+558 common _202000173_get_memory_limits     sys__202000173_get_memory_limits
+559 common _202000173_update_memory_limit   sys__202000173_update_memory_limit
+560 common _202000173_remove_memory_limit   sys__202000173_remove_memory_limit
