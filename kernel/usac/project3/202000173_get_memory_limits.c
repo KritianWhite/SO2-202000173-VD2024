@@ -3,52 +3,57 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/list.h>  
 
 struct memory_limitation {
-    pid_t pid;
+    pid_t  pid;
     size_t memory_limit;
-    struct list_head list;  // Lista enlazada para manejar múltiples procesos
+};
+
+/* Estructura interna (misma definición que en 202000173_add_memory_limit.c) */
+struct memory_limitation_entry {
+    pid_t  pid;
+    size_t memory_limit;
+    struct list_head list;
 };
 
 // Lista global para almacenar los procesos limitados
-static LIST_HEAD(memory_limited_processes);
+extern struct list_head memory_limited_processes;
 
-SYSCALL_DEFINE3(_202000173_get_memory_limits, struct memory_limitation __user *, user_buffer, size_t, max_entries, int __user *, processes_returned) {
-    struct memory_limitation *entry;
-    struct memory_limitation *buffer;
+SYSCALL_DEFINE3(_202000173_get_memory_limits, struct memory_limitation __user *, u_processes_buffer, size_t, max_entries, int __user *, processes_returned)
+{
+    struct memory_limitation_entry *entry;
     size_t count = 0;
 
-    // Validar acceso al buffer del usuario
-    if (!access_ok(user_buffer, max_entries * sizeof(struct memory_limitation))) {
-        return -EFAULT; // Error de acceso
-    }
+    /* Validar max_entries */
+    if (max_entries <= 0) return -EINVAL;
 
-    // Asignar memoria temporal para el buffer en el kernel
-    buffer = kmalloc_array(max_entries, sizeof(struct memory_limitation), GFP_KERNEL);
-    if (!buffer) {
-        return -ENOMEM;
-    }
+    /* Validar punteros */
+    if (!u_processes_buffer || !processes_returned) return -EINVAL;
 
-    // Copiar datos de la lista al buffer
+    /* Recorrer la lista y copiar hasta max_entries */
     list_for_each_entry(entry, &memory_limited_processes, list) {
-        if (count >= max_entries) break;
-        buffer[count].pid = entry->pid;
-        buffer[count].memory_limit = entry->memory_limit;
+        struct memory_limitation tmp;
+
+        if (count >= max_entries)
+            break;
+
+        /* Copiamos los datos a una struct temporal */
+        tmp.pid = entry->pid;
+        tmp.memory_limit = entry->memory_limit;
+
+        /* copy_to_user() retorna bytes que NO se copiaron => != 0 indica error */
+        if (copy_to_user(&u_processes_buffer[count], &tmp, sizeof(tmp)) != 0) {
+            return -EFAULT;
+        }
         count++;
     }
 
-    // Copiar el buffer al espacio de usuario
-    if (copy_to_user(user_buffer, buffer, count * sizeof(struct memory_limitation))) {
-        kfree(buffer);
+   /* Guardar la cantidad de procesos copiados en processes_returned */
+    if (copy_to_user(processes_returned, &count, sizeof(count)) != 0) {
         return -EFAULT;
     }
 
-    // Copiar el número de procesos al espacio de usuario
-    if (copy_to_user(processes_returned, &count, sizeof(int))) {
-        kfree(buffer);
-        return -EFAULT;
-    }
-
-    kfree(buffer); // Liberar memoria temporal
-    return 0; // Éxito
+    // kfree(buffer); // Liberar memoria temporal
+    return count; // Éxito
 }
