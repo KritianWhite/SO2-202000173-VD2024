@@ -291,3 +291,59 @@ La implementación de las syscalls para gestionar límites de memoria en proceso
 ## **Reflexión**
 Este proyecto refuerza la importancia de comprender la interacción entre el espacio de usuario y el kernel, así como la necesidad de implementar controles robustos para garantizar la seguridad y estabilidad del sistema. La experiencia también subraya el valor del manejo eficiente de errores y validaciones.
 
+## **Comentario personal**
+Esta implementación de las syscalls fue un proceso de aprendizaje intensivo y creativo. Después de trabajar en ello durante varios días, he aprendido a trabajar con lista enlazada, manejar enlaces y a utilizar las herramientas de desarrollo de Linux para del desarrollo de limitantes de memoria.
+
+## **Resolución de problemas**
+
+#### **1. Error `-EINVAL` en Parámetros Válidos**
+- La validación inicial de parámetros no maneja correctamente los valores de entrada.
+- **Solución:**
+  - Validación de parámetros en cada syscall.
+    ```c
+    if (process_pid <= 0 || memory_limit <= 0) {
+        return -EINVAL; // PID o límite inválido
+    }
+    ```
+
+#### **2. Error `-EPERM` por Falta de Permisos**
+- El programa no se ejecuta con privilegios de administrador.
+- **Solución:**
+  - Ejecutar el programa como superusuario (`sudo`):
+    ```bash
+    sudo ./1_admin_syscalls
+    sudo ./2_allocator
+    sudo ./3_error_handling
+    ```
+  - Luego en el kernel se valida que se ejecute correctamente ya con permisos:
+    ```c
+    if (!capable(CAP_SYS_ADMIN)) {
+        return -EPERM;
+    }
+    ```
+
+#### **3. Error `-EFAULT` al Copiar Datos al Usuario**
+- Las syscalls que copian datos al espacio de usuario fallan con `-EFAULT`. El puntero del usuario (`user_buffer`) es inválido o inaccesible.
+- **Solución:**
+  - Se validó el acceso al buffer del usuario antes de realizar la operación:
+    ```c
+    if (!access_ok(user_buffer, max_entries * sizeof(struct memory_limitation))) {
+        return -EFAULT;
+    }
+    ```
+  - Usamos `copy_to_user` para transferir datos al espacio de usuario y verifica posibles errores:
+    ```c
+    if (copy_to_user(user_buffer, buffer, count * sizeof(struct memory_limitation))) {
+        return -EFAULT;
+    }
+    ```
+#### **Fallo del kernel con kmalloc**
+- Al intentar asignar una región contigua de memoria personalizada, ya que al asignar no se estaba manejando de manera correcta el error de asignación.
+- **Solucion:**
+  - Se validó que la memoria sea suficiente antes de intentar reservar:
+    ```c
+    if (size > PAGE_SIZE) {
+      return -ENOMEM;
+    }
+    ```
+   - Esto permitió que la asignación de la memoria fuera eficaz y estar evitando que el kernel entrara en panic en algunos casos.
